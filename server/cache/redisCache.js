@@ -16,7 +16,10 @@ class RedisCache {
 
   async connect() {
     if (!this.connected) {
-      await this.client.connect();
+      await this.client.connect().catch((err) => {
+        console.error('[redis] connection failed', err.message);
+        throw err;
+      });
       this.connected = true;
     }
   }

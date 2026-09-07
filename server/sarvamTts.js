@@ -134,7 +134,19 @@ class SarvamTTSStream extends EventEmitter {
 
   close() {
     try {
-      this.ws?.close(1000, 'client done');
+      if (!this.ws) return;
+      
+      // If still connecting, just let it timeout - don't force close
+      if (this.ws.readyState === WebSocket.CONNECTING) {
+        return;
+      }
+      
+      // Remove all listeners to prevent error events
+      this.ws.removeAllListeners();
+      
+      if (this.ws.readyState === WebSocket.OPEN) {
+        this.ws.close(1000, 'client done');
+      }
     } catch {
       /* noop */
     }

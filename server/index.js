@@ -47,7 +47,7 @@ function buildConfig() {
     qdrantCollection: process.env.QDRANT_COLLECTION,
     embeddingModel: process.env.EMBEDDING_MODEL,
     ragTopK: Number(process.env.RAG_TOP_K || 2),
-    ragContextTokenLimit: Number(process.env.RAG_CONTEXT_TOKEN_LIMIT || 1000),
+    ragContextTokenLimit: Number(process.env.RAG_CONTEXT_TOKEN_LIMIT || 2000),
     ragTimeoutMs: Number(process.env.RAG_RETRIEVAL_TIMEOUT_MS || 150),
     shortTermTurns: Number(process.env.SHORT_TERM_TURNS || 3),
     cache,

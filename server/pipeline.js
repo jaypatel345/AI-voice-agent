@@ -9,7 +9,7 @@ const BASE_SYSTEM_PROMPT =
   'You are a fast, concise voice assistant. Answer in 1-3 short spoken sentences. ' +
   'Use the provided context if relevant; if not relevant, answer from general knowledge. Never say you are an AI.';
 
-const PARTIAL_DEBOUNCE_MS = 50; // Faster response - fire immediately after speech pauses
+const PARTIAL_DEBOUNCE_MS = 30; // Faster response - fire immediately after speech pauses
 const MIN_TRIGGER_CHARS = 3;
 
 /**
@@ -134,12 +134,30 @@ class VoiceSession {
       return;
     }
 
-    // --- LLM streaming, accumulate full response then TTS ---
+    // --- LLM streaming with clause-boundary TTS for lower latency ---
     let sentenceBuffer = '';
     let fullReply = '';
+    let ttsStream = null;
+    
     try {
       // Build system prompt with user memory
       const systemPrompt = this._buildSystemPrompt();
+      
+      // Initialize TTS stream early for clause-by-clause synthesis
+      ttsStream = new SarvamTTSStream({
+        apiKey: this.config.sarvamApiKey,
+        model: this.config.ttsModel,
+        speaker: this.config.ttsSpeaker,
+        targetLanguageCode: this.config.ttsLanguageCode,
+        sampleRate: this.config.ttsSampleRate,
+      }).connect();
+      turn.ttsStream = ttsStream;
+      if (ttsStream) {
+        this._wireTtsToClient(turn, timer);
+      }
+      
+      let clauseBuffer = '';
+      const CLAUSE_DELIMITERS = /[.!?;,\n]/;
       
       fullReply = await this.llm.streamReply({
         systemPrompt,
@@ -150,20 +168,40 @@ class VoiceSession {
           if (turn.aborted) return;
           if (timer.marks.llm_first_token == null) timer.mark('llm_first_token');
           sentenceBuffer += delta;
+          clauseBuffer += delta;
+          
           // Send partial text to client for display
           this.send({ type: 'reply_text', text: sentenceBuffer });
+          
+          // Flush clause to TTS when delimiter found
+          if (CLAUSE_DELIMITERS.test(delta)) {
+            const clause = clauseBuffer.trim();
+            if (clause && ttsStream) {
+              try {
+                ttsStream.pushText(clause + ' ');
+              } catch (e) {
+                console.error('[Pipeline] TTS pushText error:', e.message);
+              }
+              clauseBuffer = '';
+            }
+          }
         },
       });
+
+      // Flush remaining buffer
+      if (clauseBuffer.trim() && ttsStream) {
+        ttsStream.pushText(clauseBuffer);
+      }
+      if (ttsStream) ttsStream.flush();
 
       // Extract user information from conversation
       this._extractUserInfo(userText, fullReply);
     } catch (err) {
       this.send({ type: 'error', stage: 'llm', message: err.message });
+      // Don't close ttsStream here - it will clean up itself on error
       return;
     }
 
-    // --- TTS: synthesize full response at once for natural voice ---
-    this._speak(turn, fullReply, timer);
     this._pushShortTermTurn(userText, fullReply);
     if (this.cache) this.cache.set(userText, { reply: fullReply }).catch(() => {});
   }
@@ -182,7 +220,10 @@ class VoiceSession {
   }
 
   _wireTtsToClient(turn, timer) {
-    turn.ttsStream.on('audio', (base64Audio, contentType) => {
+    if (!turn.ttsStream) return;
+    
+    const stream = turn.ttsStream;
+    stream.on('audio', (base64Audio, contentType) => {
       if (turn.aborted) return;
       if (!turn.ttsStarted) {
         turn.ttsStarted = true;
@@ -193,14 +234,14 @@ class VoiceSession {
       }
       this.send({ type: 'audio_chunk', audio: base64Audio, contentType });
     });
-    turn.ttsStream.on('done', () => {
+    stream.on('done', () => {
       if (!turn.aborted) {
         timer.mark('turn_end');
         this.send({ type: 'turn_done' });
       }
       if (this.activeTurn === turn) this.activeTurn = null;
     });
-    turn.ttsStream.on('error', (err) => {
+    stream.on('error', (err) => {
       this.send({ type: 'error', stage: 'tts', message: err.message });
     });
   }
