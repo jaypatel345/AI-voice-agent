@@ -2,6 +2,7 @@
   const micBtn = document.getElementById('micBtn');
   const textInput = document.getElementById('textInput');
   const sendTextBtn = document.getElementById('sendTextBtn');
+  const clearBtn = document.getElementById('clearBtn');
   const statusEl = document.getElementById('status');
   const transcriptEl = document.getElementById('transcript');
   const replyEl = document.getElementById('reply');
@@ -22,6 +23,9 @@
   let shouldReconnect = false;
   let reconnectAttempts = 0;
   const MAX_RECONNECT_ATTEMPTS = 5;
+  
+  // Conversation history for transcript display
+  let conversationHistory = [];
 
   // --- Gapless playback scheduling ---
   let playbackCtx = null;
@@ -278,12 +282,33 @@
     setStatus('Idle');
   }
 
+  function clearConversation() {
+    conversationHistory = [];
+    updateTranscriptDisplay();
+    replyEl.textContent = '';
+    transcriptEl.textContent = '';
+    setStatus('Conversation cleared');
+    setTimeout(() => setStatus('Idle'), 2000);
+  }
+
   function setStatus(text) { statusEl.textContent = text; }
+
+  function updateTranscriptDisplay() {
+    transcriptEl.innerHTML = conversationHistory.map((turn, index) => {
+      const isUser = turn.role === 'user';
+      const prefix = isUser ? '👤 You:' : '🤖 Assistant:';
+      return `<div class="turn ${turn.role}"><strong>${prefix}</strong> ${turn.text}</div>`;
+    }).join('');
+    // Auto-scroll to bottom
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  }
 
   function handleServerMessage(msg) {
     switch (msg.type) {
       case 'transcript':
-        transcriptEl.textContent = msg.text;
+        // Add user message to conversation history
+        conversationHistory.push({ role: 'user', text: msg.text });
+        updateTranscriptDisplay();
         break;
       case 'vad':
         if (msg.signal === 'START_SPEECH') {
@@ -300,6 +325,9 @@
         setStatus('Listening (interrupted)…');
         break;
       case 'reply_text':
+        // Add assistant response to conversation history
+        conversationHistory.push({ role: 'assistant', text: msg.text });
+        updateTranscriptDisplay();
         replyEl.textContent = msg.text + (msg.cached ? '  ⚡ (cached)' : '');
         break;
       case 'audio_chunk':
@@ -341,7 +369,9 @@
       if (ws.readyState === WebSocket.OPEN) {
         setStatus('Connected — sending text…');
         ws.send(JSON.stringify({ type: 'text_input', text: text }));
-        transcriptEl.textContent = text;
+        // Add to conversation history
+        conversationHistory.push({ role: 'user', text: text });
+        updateTranscriptDisplay();
         textInput.value = '';
       } else if (ws.readyState === WebSocket.CONNECTING) {
         setTimeout(waitForConnection, 100);
@@ -360,6 +390,7 @@
   });
 
   sendTextBtn.addEventListener('click', sendText);
+  clearBtn.addEventListener('click', clearConversation);
   textInput.addEventListener('keypress', (e) => {
     if (e.key === 'Enter') sendText();
   });
