@@ -1,0 +1,74 @@
+{
+  "name": "Voice Assistant - Support Workflows",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "voice-kb-reindex",
+        "options": {}
+      },
+      "name": "Webhook: Trigger KB Re-index",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "command": "npm run ingest",
+        "cwd": "/opt/voice-assistant"
+      },
+      "name": "Run Ingest Script",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "path": "voice-latency-alert",
+        "options": {}
+      },
+      "name": "Webhook: Latency Breach",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [200, 500]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{$json[\"first_audio_to_client_ms\"]}}",
+              "operation": "larger",
+              "value2": 2500
+            }
+          ]
+        }
+      },
+      "name": "IF Latency > 2500ms",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [460, 500]
+    },
+    {
+      "parameters": {
+        "channel": "#voice-assistant-alerts",
+        "text": "=Latency breach: turn {{$json[\"turnId\"]}} took {{$json[\"first_audio_to_client_ms\"]}}ms (budget 2500ms)"
+      },
+      "name": "Slack: Notify",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [720, 500]
+    }
+  ],
+  "connections": {
+    "Webhook: Trigger KB Re-index": {
+      "main": [[{ "node": "Run Ingest Script", "type": "main", "index": 0 }]]
+    },
+    "Webhook: Latency Breach": {
+      "main": [[{ "node": "IF Latency > 2500ms", "type": "main", "index": 0 }]]
+    },
+    "IF Latency > 2500ms": {
+      "main": [[{ "node": "Slack: Notify", "type": "main", "index": 0 }], []]
+    }
+  },
+  "_notes": "The real-time voice pipeline (STT -> RAG -> LLM -> TTS) intentionally runs OUTSIDE n8n in server/pipeline.js, because every HTTP hop through an n8n webhook adds 50-150ms+ of round-trip latency that the sub-1.5s budget cannot absorb. n8n is used here for what it's good at instead: async/administrative workflows (knowledge-base re-indexing, latency-breach alerting, CRM/lead-capture hooks) that are NOT on the hot path of a single turn. If you must route the hot path through n8n for architectural consistency, use n8n's 'Respond to Webhook (streaming)' mode and keep the workflow to a single node calling server/pipeline.js's turn handler directly rather than chaining multiple webhook hops."
+}

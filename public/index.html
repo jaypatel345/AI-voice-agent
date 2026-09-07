@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Low-Latency Voice Assistant</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main>
+    <h1>🎙️ Low-Latency Voice Assistant</h1>
+    <p class="subtitle">Sarvam STT/TTS · Qdrant RAG · OpenAI LLM · Redis cache</p>
+
+    <div class="controls">
+      <button id="micBtn" class="mic-btn">Start talking</button>
+      <input type="text" id="textInput" placeholder="Or type here to test..." class="text-input" />
+      <button id="sendTextBtn" class="send-btn">Send</button>
+    </div>
+    <div id="status" class="status">Idle</div>
+
+    <section class="panel">
+      <h2>Transcript</h2>
+      <div id="transcript" class="scrollbox"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Assistant reply</h2>
+      <div id="reply" class="scrollbox"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Latency</h2>
+      <div id="latency" class="latency">
+        <div>First audio: <span id="latFirstAudio">–</span> ms</div>
+        <div>RAG: <span id="latRag">–</span> ms</div>
+        <div>LLM first token: <span id="latLlm">–</span> ms</div>
+      </div>
+    </section>
+  </main>
+  <script src="client.js"></script>
+</body>
+</html>

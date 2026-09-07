@@ -1,0 +1,90 @@
+{
+  "generatedAt": "2026-09-07T08:57:04.374Z",
+  "runs": 5,
+  "successful": 5,
+  "first_audio_ms": {
+    "p50": 1501,
+    "p90": 1516,
+    "max": 2109,
+    "min": 952
+  },
+  "target_ms": 1500,
+  "max_allowed_ms": 2000,
+  "raw": [
+    {
+      "firstAudioMs": 2109,
+      "latencySummary": {
+        "turnId": 1,
+        "partial_transcript_ms": 0.097875,
+        "rag_retrieved_ms": 55.170792,
+        "rag_latency_ms": 55.1,
+        "llm_first_token_ms": 1629.5695,
+        "llm_first_token_latency_ms": 1629.5,
+        "tts_first_chunk_ms": 2084.81925,
+        "first_audio_to_client_ms": 2084.823875,
+        "cache_hit": false,
+        "turn_end_ms": null
+      }
+    },
+    {
+      "firstAudioMs": 1516,
+      "latencySummary": {
+        "turnId": 1,
+        "partial_transcript_ms": 0.003,
+        "rag_retrieved_ms": 16.881709,
+        "rag_latency_ms": 16.9,
+        "llm_first_token_ms": 1115.945084,
+        "llm_first_token_latency_ms": 1115.9,
+        "tts_first_chunk_ms": 1513.571209,
+        "first_audio_to_client_ms": 1513.573042,
+        "cache_hit": false,
+        "turn_end_ms": null
+      }
+    },
+    {
+      "firstAudioMs": 952,
+      "latencySummary": {
+        "turnId": 1,
+        "partial_transcript_ms": 0.012917,
+        "rag_retrieved_ms": 16.0845,
+        "rag_latency_ms": 16.1,
+        "llm_first_token_ms": 633.62075,
+        "llm_first_token_latency_ms": 633.6,
+        "tts_first_chunk_ms": 949.5795,
+        "first_audio_to_client_ms": 949.581333,
+        "cache_hit": false,
+        "turn_end_ms": null
+      }
+    },
+    {
+      "firstAudioMs": 1501,
+      "latencySummary": {
+        "turnId": 1,
+        "partial_transcript_ms": 0.002959,
+        "rag_retrieved_ms": 11.970709,
+        "rag_latency_ms": 12,
+        "llm_first_token_ms": 1245.694292,
+        "llm_first_token_latency_ms": 1245.7,
+        "tts_first_chunk_ms": 1498.428584,
+        "first_audio_to_client_ms": 1498.430542,
+        "cache_hit": false,
+        "turn_end_ms": null
+      }
+    },
+    {
+      "firstAudioMs": 1078,
+      "latencySummary": {
+        "turnId": 1,
+        "partial_transcript_ms": 0.001708,
+        "rag_retrieved_ms": 25.315125,
+        "rag_latency_ms": 25.3,
+        "llm_first_token_ms": 653.632375,
+        "llm_first_token_latency_ms": 653.6,
+        "tts_first_chunk_ms": 1073.110541,
+        "first_audio_to_client_ms": 1073.112625,
+        "cache_hit": false,
+        "turn_end_ms": null
+      }
+    }
+  ]
+}
