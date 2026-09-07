@@ -24,8 +24,8 @@
   let reconnectAttempts = 0;
   const MAX_RECONNECT_ATTEMPTS = 5;
   
-  // Conversation history for transcript display
-  let conversationHistory = [];
+  // Single transcript for continuous conversation
+  let fullTranscript = '';
 
   // --- Gapless playback scheduling ---
   let playbackCtx = null;
@@ -283,7 +283,7 @@
   }
 
   function clearConversation() {
-    conversationHistory = [];
+    fullTranscript = '';
     updateTranscriptDisplay();
     replyEl.textContent = '';
     transcriptEl.textContent = '';
@@ -294,11 +294,7 @@
   function setStatus(text) { statusEl.textContent = text; }
 
   function updateTranscriptDisplay() {
-    transcriptEl.innerHTML = conversationHistory.map((turn, index) => {
-      const isUser = turn.role === 'user';
-      const prefix = isUser ? '👤 You:' : '🤖 Assistant:';
-      return `<div class="turn ${turn.role}"><strong>${prefix}</strong> ${turn.text}</div>`;
-    }).join('');
+    transcriptEl.textContent = fullTranscript;
     // Auto-scroll to bottom
     transcriptEl.scrollTop = transcriptEl.scrollHeight;
   }
@@ -306,8 +302,8 @@
   function handleServerMessage(msg) {
     switch (msg.type) {
       case 'transcript':
-        // Add user message to conversation history
-        conversationHistory.push({ role: 'user', text: msg.text });
+        // Append user message to single transcript
+        fullTranscript += `You: ${msg.text}\n`;
         updateTranscriptDisplay();
         break;
       case 'vad':
@@ -325,8 +321,8 @@
         setStatus('Listening (interrupted)…');
         break;
       case 'reply_text':
-        // Add assistant response to conversation history
-        conversationHistory.push({ role: 'assistant', text: msg.text });
+        // Append assistant response to single transcript
+        fullTranscript += `Assistant: ${msg.text}\n`;
         updateTranscriptDisplay();
         replyEl.textContent = msg.text + (msg.cached ? '  ⚡ (cached)' : '');
         break;
@@ -369,8 +365,8 @@
       if (ws.readyState === WebSocket.OPEN) {
         setStatus('Connected — sending text…');
         ws.send(JSON.stringify({ type: 'text_input', text: text }));
-        // Add to conversation history
-        conversationHistory.push({ role: 'user', text: text });
+        // Add to single transcript
+        fullTranscript += `You: ${text}\n`;
         updateTranscriptDisplay();
         textInput.value = '';
       } else if (ws.readyState === WebSocket.CONNECTING) {
