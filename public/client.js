@@ -309,17 +309,13 @@
   function handleServerMessage(msg) {
     switch (msg.type) {
       case 'transcript':
-        // Smart accumulation of partial transcripts
+        // Simple accumulation: always keep the longest text while speaking
         if (isUserSpeaking) {
-          // While speaking, try to keep the longest/most complete version
-          if (msg.text.length > currentUserMessage.length) {
-            // New text is longer, assume it's more complete
-            currentUserMessage = msg.text;
-          } else if (msg.text.length === currentUserMessage.length) {
-            // Same length, could be correction, update anyway
+          if (!currentUserMessage || msg.text.length > currentUserMessage.length) {
+            // Use the longer text (assume it's more complete)
             currentUserMessage = msg.text;
           }
-          // If shorter, keep the longer version (don't replace with partial)
+          // If it's shorter, keep the longer accumulated version
         } else {
           // Not speaking, just update with whatever we got
           currentUserMessage = msg.text;
