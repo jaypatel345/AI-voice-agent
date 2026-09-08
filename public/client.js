@@ -28,6 +28,8 @@
   let currentUserMessage = '';
   let currentAssistantReply = '';
   let isAssistantStreaming = false;
+  let isUserSpeaking = false;
+  let partialTranscript = ''; // Accumulate partial transcripts
 
   // --- Gapless playback scheduling ---
   let playbackCtx = null;
@@ -288,6 +290,7 @@
     currentUserMessage = '';
     currentAssistantReply = '';
     isAssistantStreaming = false;
+    isUserSpeaking = false;
     updateTranscriptDisplay();
     replyEl.textContent = '';
     setStatus('Conversation cleared');
@@ -306,21 +309,36 @@
   function handleServerMessage(msg) {
     switch (msg.type) {
       case 'transcript':
-        // Update current user message
-        currentUserMessage = msg.text;
-        currentAssistantReply = ''; // Clear previous reply
-        isAssistantStreaming = false; // Reset streaming state
+        // Smart accumulation of partial transcripts
+        if (isUserSpeaking) {
+          // While speaking, try to keep the longest/most complete version
+          if (msg.text.length > currentUserMessage.length) {
+            // New text is longer, assume it's more complete
+            currentUserMessage = msg.text;
+          } else if (msg.text.length === currentUserMessage.length) {
+            // Same length, could be correction, update anyway
+            currentUserMessage = msg.text;
+          }
+          // If shorter, keep the longer version (don't replace with partial)
+        } else {
+          // Not speaking, just update with whatever we got
+          currentUserMessage = msg.text;
+        }
         updateTranscriptDisplay();
-        replyEl.textContent = ''; // Clear assistant response display
         break;
       case 'vad':
         if (msg.signal === 'START_SPEECH') {
           setStatus('Listening…');
           // Allow user to speak even if assistant is speaking (barge-in)
           assistantSpeaking = false;
+          isUserSpeaking = true; // User is currently speaking
+          partialTranscript = ''; // Reset for new utterance
+          currentUserMessage = ''; // Clear previous user message for new utterance
+          updateTranscriptDisplay();
         }
         if (msg.signal === 'END_SPEECH') {
           setStatus('Thinking…');
+          isUserSpeaking = false; // User finished speaking
           isAssistantStreaming = true; // Start of assistant response
         }
         break;
@@ -379,6 +397,7 @@
         currentUserMessage = text;
         currentAssistantReply = '';
         isAssistantStreaming = false;
+        isUserSpeaking = false; // Text input is instant, not speaking
         updateTranscriptDisplay();
         replyEl.textContent = ''; // Clear assistant response
         textInput.value = '';
