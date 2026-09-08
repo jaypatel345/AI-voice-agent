@@ -290,7 +290,6 @@
     isAssistantStreaming = false;
     updateTranscriptDisplay();
     replyEl.textContent = '';
-    transcriptEl.textContent = '';
     setStatus('Conversation cleared');
     setTimeout(() => setStatus('Idle'), 2000);
   }
@@ -298,14 +297,8 @@
   function setStatus(text) { statusEl.textContent = text; }
 
   function updateTranscriptDisplay() {
-    let display = '';
-    if (currentUserMessage) {
-      display += `You: ${currentUserMessage}\n`;
-    }
-    if (currentAssistantReply) {
-      display += `Assistant: ${currentAssistantReply}`;
-    }
-    transcriptEl.textContent = display;
+    // Only show user message in transcript section
+    transcriptEl.textContent = currentUserMessage ? `You: ${currentUserMessage}` : '';
     // Auto-scroll to bottom
     transcriptEl.scrollTop = transcriptEl.scrollHeight;
   }
@@ -318,6 +311,7 @@
         currentAssistantReply = ''; // Clear previous reply
         isAssistantStreaming = false; // Reset streaming state
         updateTranscriptDisplay();
+        replyEl.textContent = ''; // Clear assistant response display
         break;
       case 'vad':
         if (msg.signal === 'START_SPEECH') {
@@ -337,11 +331,8 @@
         setStatus('Listening (interrupted)…');
         break;
       case 'reply_text':
-        // Only update assistant reply on complete message (not during streaming)
-        if (!isAssistantStreaming) {
-          currentAssistantReply = msg.text;
-          updateTranscriptDisplay();
-        }
+        // Only update assistant reply in the dedicated section
+        currentAssistantReply = msg.text;
         replyEl.textContent = msg.text + (msg.cached ? '  ⚡ (cached)' : '');
         break;
       case 'audio_chunk':
@@ -389,6 +380,7 @@
         currentAssistantReply = '';
         isAssistantStreaming = false;
         updateTranscriptDisplay();
+        replyEl.textContent = ''; // Clear assistant response
         textInput.value = '';
       } else if (ws.readyState === WebSocket.CONNECTING) {
         setTimeout(waitForConnection, 100);
