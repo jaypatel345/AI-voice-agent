@@ -24,8 +24,10 @@
   let reconnectAttempts = 0;
   const MAX_RECONNECT_ATTEMPTS = 5;
   
-  // Single transcript for continuous conversation
-  let fullTranscript = '';
+  // Current message display (not full history)
+  let currentUserMessage = '';
+  let currentAssistantReply = '';
+  let isAssistantStreaming = false;
 
   // --- Gapless playback scheduling ---
   let playbackCtx = null;
@@ -283,7 +285,9 @@
   }
 
   function clearConversation() {
-    fullTranscript = '';
+    currentUserMessage = '';
+    currentAssistantReply = '';
+    isAssistantStreaming = false;
     updateTranscriptDisplay();
     replyEl.textContent = '';
     transcriptEl.textContent = '';
@@ -294,7 +298,14 @@
   function setStatus(text) { statusEl.textContent = text; }
 
   function updateTranscriptDisplay() {
-    transcriptEl.textContent = fullTranscript;
+    let display = '';
+    if (currentUserMessage) {
+      display += `You: ${currentUserMessage}\n`;
+    }
+    if (currentAssistantReply) {
+      display += `Assistant: ${currentAssistantReply}`;
+    }
+    transcriptEl.textContent = display;
     // Auto-scroll to bottom
     transcriptEl.scrollTop = transcriptEl.scrollHeight;
   }
@@ -302,8 +313,10 @@
   function handleServerMessage(msg) {
     switch (msg.type) {
       case 'transcript':
-        // Append user message to single transcript
-        fullTranscript += `You: ${msg.text}\n`;
+        // Update current user message
+        currentUserMessage = msg.text;
+        currentAssistantReply = ''; // Clear previous reply
+        isAssistantStreaming = false; // Reset streaming state
         updateTranscriptDisplay();
         break;
       case 'vad':
@@ -312,7 +325,10 @@
           // Allow user to speak even if assistant is speaking (barge-in)
           assistantSpeaking = false;
         }
-        if (msg.signal === 'END_SPEECH') setStatus('Thinking…');
+        if (msg.signal === 'END_SPEECH') {
+          setStatus('Thinking…');
+          isAssistantStreaming = true; // Start of assistant response
+        }
         break;
       case 'barge_in':
         resetPlayback();
@@ -321,9 +337,11 @@
         setStatus('Listening (interrupted)…');
         break;
       case 'reply_text':
-        // Append assistant response to single transcript
-        fullTranscript += `Assistant: ${msg.text}\n`;
-        updateTranscriptDisplay();
+        // Only update assistant reply on complete message (not during streaming)
+        if (!isAssistantStreaming) {
+          currentAssistantReply = msg.text;
+          updateTranscriptDisplay();
+        }
         replyEl.textContent = msg.text + (msg.cached ? '  ⚡ (cached)' : '');
         break;
       case 'audio_chunk':
@@ -333,6 +351,7 @@
         break;
       case 'turn_done':
         assistantSpeaking = false;
+        isAssistantStreaming = false;
         setStatus('Listening…');
         break;
       case 'info':
@@ -365,8 +384,10 @@
       if (ws.readyState === WebSocket.OPEN) {
         setStatus('Connected — sending text…');
         ws.send(JSON.stringify({ type: 'text_input', text: text }));
-        // Add to single transcript
-        fullTranscript += `You: ${text}\n`;
+        // Update current user message
+        currentUserMessage = text;
+        currentAssistantReply = '';
+        isAssistantStreaming = false;
         updateTranscriptDisplay();
         textInput.value = '';
       } else if (ws.readyState === WebSocket.CONNECTING) {
