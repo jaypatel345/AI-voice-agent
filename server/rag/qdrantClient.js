@@ -1,49 +1,44 @@
 import { QdrantClient } from '@qdrant/js-client-rest';
-import { pipeline, env } from '@xenova/transformers';
-
-// Disable local model downloads, use cache
-env.allowLocalModels = false;
-env.useBrowserCache = false;
-
-// Global embedder instance (lazy loaded)
-let embedder = null;
-let embeddingModelName = null;
+import { VertexEmbedder } from './embedder.js';
 
 /**
  * RAG retrieval, bounded to RAG_RETRIEVAL_TIMEOUT_MS (default 150ms) per
- * the spec. Embeddings are precomputed at ingest time (server/rag/ingest.js);
- * at query time we only embed the short user utterance, which is fast, then
- * do a single Qdrant top_k search.
+ * the spec. Document embeddings are precomputed at ingest time
+ * (server/rag/ingest.js) with Google `text-embedding-004`; at query time we
+ * embed only the short user utterance (cached in Redis) then do a single
+ * Qdrant top_k search.
  *
  * If retrieval doesn't land inside the budget, we abort and let the LLM
  * answer with no context rather than block the pipeline -- a slow RAG hit
  * must never blow the sub-2s latency budget.
  */
 class RagRetriever {
-  constructor({ qdrantUrl, qdrantApiKey, collection, embeddingModel, topK, contextTokenLimit, timeoutMs }) {
+  constructor({ qdrantUrl, qdrantApiKey, collection, embeddingModel, project, location, topK, contextTokenLimit, timeoutMs, cache }) {
     this.client = new QdrantClient({ url: qdrantUrl, apiKey: qdrantApiKey || undefined });
     this.collection = collection || 'voice_kb';
     this.topK = topK || 2;
     this.contextTokenLimit = contextTokenLimit || 1000;
     this.timeoutMs = timeoutMs || 150;
-    this.embeddingModel = embeddingModel || 'Xenova/bge-small-en-v1.5';
-    // Lazy load embedder on first use
+    this.cache = cache || null;
+    this.embedder = new VertexEmbedder({ model: embeddingModel, project, location });
   }
 
-  async _getEmbedder() {
-    if (!embedder || embeddingModelName !== this.embeddingModel) {
-      console.log(`Loading local embedding model: ${this.embeddingModel}...`);
-      embedder = await pipeline('feature-extraction', this.embeddingModel);
-      embeddingModelName = this.embeddingModel;
-      console.log('Embedding model loaded.');
-    }
-    return embedder;
+  /** Warm the embedding + Qdrant connections so the first turn isn't slow. */
+  async warmup() {
+    await Promise.all([
+      this.embedder.warmup(),
+      this.client.getCollections().catch(() => {}),
+    ]);
   }
 
   async _embedQuery(text) {
-    const model = await this._getEmbedder();
-    const embedding = await model(text, { pooling: 'mean', normalize: true });
-    return Array.from(embedding.data);
+    if (this.cache) {
+      const cached = await this.cache.getEmbedding(text).catch(() => null);
+      if (cached) return cached;
+    }
+    const vector = await this.embedder.embed(text, 'RETRIEVAL_QUERY');
+    if (this.cache) this.cache.setEmbedding(text, vector).catch(() => {});
+    return vector;
   }
 
   /**
@@ -65,23 +60,24 @@ class RagRetriever {
 
   async _doRetrieve(queryText) {
     const vector = await this._embedQuery(queryText);
-    const search = await this.client.search(this.collection, {
-      vector,
+    const res = await this.client.query(this.collection, {
+      query: vector,
       limit: this.topK,
       with_payload: true,
     });
+    const hits = res.points || [];
 
     // Trim to the context token budget (rough estimate: ~4 chars/token)
     const maxChars = this.contextTokenLimit * 4;
     let used = 0;
     const pieces = [];
-    for (const hit of search) {
+    for (const hit of hits) {
       const chunk = hit.payload?.text || '';
       if (used + chunk.length > maxChars) break;
       pieces.push(chunk);
       used += chunk.length;
     }
-    return { context: pieces.join('\n---\n'), hits: search, timedOut: false };
+    return { context: pieces.join('\n---\n'), hits, timedOut: false };
   }
 }
 

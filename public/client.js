@@ -1,7 +1,5 @@
 (() => {
   const micBtn = document.getElementById('micBtn');
-  const textInput = document.getElementById('textInput');
-  const sendTextBtn = document.getElementById('sendTextBtn');
   const clearBtn = document.getElementById('clearBtn');
   const statusEl = document.getElementById('status');
   const transcriptEl = document.getElementById('transcript');
@@ -29,11 +27,13 @@
   let currentAssistantReply = '';
   let isAssistantStreaming = false;
   let isUserSpeaking = false;
-  let partialTranscript = ''; // Accumulate partial transcripts
 
   // --- Gapless playback scheduling ---
   let playbackCtx = null;
   let nextStartTime = 0;
+  let activeSources = [];      // AudioBufferSourceNodes currently scheduled/playing
+  let latestTurnId = 0;        // highest turn id we've seen audio/text for
+  let interruptedThrough = 0;  // highest turn id cancelled by barge-in — drop anything <=
 
   function ensurePlaybackContext() {
     if (!playbackCtx) {
@@ -91,9 +91,19 @@
     gainNode.connect(ctx.destination);
     src.start(startAt);
     nextStartTime = startAt + duration;
+
+    // Track the node so barge-in can hard-stop everything already scheduled.
+    activeSources.push(src);
+    src.onended = () => { activeSources = activeSources.filter((s) => s !== src); };
   }
 
+  // Barge-in: stop every scheduled/playing chunk immediately so old audio
+  // can't continue after the user interrupts.
   function resetPlayback() {
+    for (const s of activeSources) {
+      try { s.onended = null; s.stop(); s.disconnect(); } catch (e) { /* already ended */ }
+    }
+    activeSources = [];
     if (playbackCtx) nextStartTime = playbackCtx.currentTime;
   }
 
@@ -265,7 +275,6 @@
 
     listening = true;
     micBtn.classList.add('listening');
-    micBtn.textContent = 'Stop';
     setStatus('Listening…');
   }
 
@@ -273,8 +282,7 @@
     listening = false;
     shouldReconnect = false;
     micBtn.classList.remove('listening');
-    micBtn.textContent = 'Start talking';
-    
+
     processorNode?.disconnect();
     sourceNode?.disconnect();
     micStream?.getTracks().forEach((t) => t.stop());
@@ -309,17 +317,9 @@
   function handleServerMessage(msg) {
     switch (msg.type) {
       case 'transcript':
-        // Simple accumulation: always keep the longest text while speaking
-        if (isUserSpeaking) {
-          if (!currentUserMessage || msg.text.length > currentUserMessage.length) {
-            // Use the longer text (assume it's more complete)
-            currentUserMessage = msg.text;
-          }
-          // If it's shorter, keep the longer accumulated version
-        } else {
-          // Not speaking, just update with whatever we got
-          currentUserMessage = msg.text;
-        }
+        // The server sends the full accumulated utterance (it stitches STT
+        // speech segments together across pauses) -- just render it.
+        currentUserMessage = msg.text;
         updateTranscriptDisplay();
         break;
       case 'vad':
@@ -328,9 +328,8 @@
           // Allow user to speak even if assistant is speaking (barge-in)
           assistantSpeaking = false;
           isUserSpeaking = true; // User is currently speaking
-          partialTranscript = ''; // Reset for new utterance
-          currentUserMessage = ''; // Clear previous user message for new utterance
-          updateTranscriptDisplay();
+          // Don't clear currentUserMessage here: the server decides where one
+          // utterance ends, and its next transcript carries the right text.
         }
         if (msg.signal === 'END_SPEECH') {
           setStatus('Thinking…');
@@ -339,22 +338,29 @@
         }
         break;
       case 'barge_in':
+        interruptedThrough = Math.max(interruptedThrough, msg.turnId || latestTurnId);
         resetPlayback();
         replyEl.textContent = '';
         assistantSpeaking = false;
         setStatus('Listening (interrupted)…');
         break;
       case 'reply_text':
-        // Only update assistant reply in the dedicated section
+        if (msg.turnId != null && msg.turnId <= interruptedThrough) break; // stale turn
+        if (msg.turnId != null) latestTurnId = Math.max(latestTurnId, msg.turnId);
         currentAssistantReply = msg.text;
         replyEl.textContent = msg.text + (msg.cached ? '  ⚡ (cached)' : '');
         break;
       case 'audio_chunk':
+        // Drop chunks from a turn the user already interrupted (they can still
+        // be in flight on the socket after barge_in).
+        if (msg.turnId != null && msg.turnId <= interruptedThrough) break;
+        if (msg.turnId != null) latestTurnId = Math.max(latestTurnId, msg.turnId);
         assistantSpeaking = true;
         playPcmChunk(msg.audio);
         setStatus('Speaking…');
         break;
       case 'turn_done':
+        if (msg.turnId != null && msg.turnId <= interruptedThrough) break;
         assistantSpeaking = false;
         isAssistantStreaming = false;
         setStatus('Listening…');
@@ -374,48 +380,10 @@
     }
   }
 
-  async function sendText() {
-    const text = textInput.value.trim();
-    if (!text) return;
-    
-    shouldReconnect = true;
-    
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      establishWebSocketConnection();
-    }
-    
-    // Wait for connection to be established
-    const waitForConnection = () => {
-      if (ws.readyState === WebSocket.OPEN) {
-        setStatus('Connected — sending text…');
-        ws.send(JSON.stringify({ type: 'text_input', text: text }));
-        // Update current user message
-        currentUserMessage = text;
-        currentAssistantReply = '';
-        isAssistantStreaming = false;
-        isUserSpeaking = false; // Text input is instant, not speaking
-        updateTranscriptDisplay();
-        replyEl.textContent = ''; // Clear assistant response
-        textInput.value = '';
-      } else if (ws.readyState === WebSocket.CONNECTING) {
-        setTimeout(waitForConnection, 100);
-      } else {
-        establishWebSocketConnection();
-        setTimeout(waitForConnection, 500);
-      }
-    };
-    
-    waitForConnection();
-  }
-
   micBtn.addEventListener('click', () => {
     if (listening) stopListening();
     else startListening();
   });
 
-  sendTextBtn.addEventListener('click', sendText);
   clearBtn.addEventListener('click', clearConversation);
-  textInput.addEventListener('keypress', (e) => {
-    if (e.key === 'Enter') sendText();
-  });
 })();

@@ -1,16 +1,39 @@
 import { SarvamSTTStream } from './sarvamStt.js';
 import { SarvamTTSStream } from './sarvamTts.js';
 import { GeminiStreamingLLM } from './llmGemini.js';
-import { OpenAIStreamingLLM } from './llmOpenai.js';
 import { RagRetriever } from './rag/qdrantClient.js';
 import { TurnTimer } from './utils/latencyLogger.js';
 
 const BASE_SYSTEM_PROMPT =
-  'You are a fast, concise voice assistant. Answer in 1-3 short spoken sentences. ' +
-  'Use the provided context if relevant; if not relevant, answer from general knowledge. Never say you are an AI.';
+  'You are a concise voice assistant. For greetings and small talk, reply naturally and briefly. ' +
+  'For any question seeking facts or information, use ONLY the provided context and never outside ' +
+  'knowledge; if such a question is not answered by the context, say you do not have that information. ' +
+  'Reply in 1-2 short spoken sentences. Never say you are an AI.';
 
 const PARTIAL_DEBOUNCE_MS = 30; // Faster response - fire immediately after speech pauses
 const MIN_TRIGGER_CHARS = 3;
+const UTTERANCE_GAP_MS = 8000; // silence long enough that new speech is a new question
+
+/** Merge a fresh STT segment `b` onto the accumulated utterance `a` without duplicating. */
+function mergeSegment(a, b) {
+  a = (a || '').trim();
+  b = (b || '').trim();
+  if (!a) return b;
+  if (!b) return a;
+  const al = a.toLowerCase();
+  const bl = b.toLowerCase();
+  if (bl.startsWith(al)) return b;  // b is the live extension of a
+  if (al.endsWith(bl)) return a;    // b is already at the tail of a
+  return `${a} ${b}`;
+}
+
+/** True when two STT fragments look like the same segment still growing / being corrected. */
+function sameSegment(a, b) {
+  a = (a || '').toLowerCase().trim();
+  b = (b || '').toLowerCase().trim();
+  if (!a || !b) return true;
+  return a.startsWith(b) || b.startsWith(a) || a.includes(b) || b.includes(a);
+}
 
 /**
  * One instance per browser WebSocket connection. Owns the STT socket for
@@ -27,32 +50,40 @@ class VoiceSession {
     this.lastPartialText = '';
     this.activeTurn = null; // { llmAbort, ttsStream, ttsStarted }
 
+    // --- Utterance accumulation: STT resets `transcript` per speech segment,
+    // so we stitch segments together to keep the user's full question. ---
+    this._uttPrefix = '';     // finished segments of the current utterance
+    this._uttLiveSeg = '';    // the segment STT is still growing
+    this._uttAt = 0;          // timestamp of the last partial
+    this._uttConsumed = false; // set once the current utterance has been answered
+
+    this.cache = config.cache; // shared RedisCache instance or null
+
     this.rag = new RagRetriever({
       qdrantUrl: config.qdrantUrl,
       qdrantApiKey: config.qdrantApiKey,
       collection: config.qdrantCollection,
       embeddingModel: config.embeddingModel,
+      project: config.gcpProject,
+      location: config.gcpLocation,
       topK: config.ragTopK,
       contextTokenLimit: config.ragContextTokenLimit,
       timeoutMs: config.ragTimeoutMs,
+      cache: this.cache,
     });
 
-    // Select LLM based on provider
-    if (config.llmProvider === 'openai') {
-      this.llm = new OpenAIStreamingLLM({
-        model: config.openaiModel,
-        apiKey: config.openaiApiKey,
-      });
-    } else {
-      this.llm = new GeminiStreamingLLM({
-        model: config.geminiModel,
-        apiKey: config.googleApiKey,
-        useVertexAI: config.useVertexAI,
-        project: config.gcpProject,
-        location: config.gcpLocation,
-      });
-    }
-    this.cache = config.cache; // shared RedisCache instance or null
+    // LLM: Gemini on Vertex AI. Generation is served via `global` for this
+    // project (regional asia-south1 endpoint 404s); RAG/embeddings stay regional.
+    this.llm = new GeminiStreamingLLM({
+      model: config.geminiModel,
+      project: config.gcpProject,
+      location: config.geminiLocation || config.gcpLocation,
+    });
+
+    // Pre-warm the Vertex connections/auth so the first turn isn't cold
+    // (cold first-token ~1.5s vs ~0.7s warm). Fire-and-forget.
+    this.llm.warmup();
+    this.rag.warmup();
 
     this.stt = new SarvamSTTStream({
       apiKey: config.sarvamApiKey,
@@ -75,17 +106,49 @@ class VoiceSession {
     this.send({ type: 'vad', signal });
     if (signal === 'START_SPEECH' && this.activeTurn) {
       // Barge-in: the user started talking again while we were still
-      // replying. Kill the in-flight turn immediately so playback stops.
+      // replying. Kill the in-flight turn immediately (LLM + TTS) so
+      // playback stops, and tell the client which turn to discard.
+      const killedId = this.activeTurn.id;
+      const wasSpeaking = this.activeTurn.ttsStarted;
       this._abortActiveTurn();
-      this.send({ type: 'barge_in' });
+      this.send({ type: 'barge_in', turnId: killedId });
+      // Talking over the assistant's spoken answer starts a brand-new question.
+      if (wasSpeaking) this._resetUtterance();
     }
   }
 
+  _resetUtterance() {
+    this._uttPrefix = '';
+    this._uttLiveSeg = '';
+    this._uttConsumed = false;
+  }
+
   _onPartial(text, isFinal) {
-    this.send({ type: 'transcript', text, isFinal });
-    this.lastPartialText = text;
-    console.log('[Pipeline] Partial text:', text, 'isFinal:', isFinal);
-    if (!text || text.trim().length < MIN_TRIGGER_CHARS) return;
+    const seg = (text || '').trim();
+    const now = Date.now();
+
+    // Start a fresh utterance once the previous one has been answered, or after
+    // a long silence (the STT socket stays open across turns).
+    if (this._uttConsumed || (this._uttAt && now - this._uttAt > UTTERANCE_GAP_MS)) {
+      this._resetUtterance();
+    }
+    this._uttAt = now;
+
+    if (seg) {
+      // STT collapses `transcript` back to just the newest speech segment after
+      // a pause -- fold the finished segment into the prefix so a pause in the
+      // middle of a sentence doesn't drop the first half of the question.
+      if (this._uttLiveSeg && !sameSegment(this._uttLiveSeg, seg)) {
+        this._uttPrefix = mergeSegment(this._uttPrefix, this._uttLiveSeg);
+      }
+      this._uttLiveSeg = seg;
+    }
+    const full = mergeSegment(this._uttPrefix, this._uttLiveSeg).trim();
+
+    this.send({ type: 'transcript', text: full, isFinal });
+    this.lastPartialText = full;
+    console.log('[Pipeline] Partial text:', full, 'isFinal:', isFinal);
+    if (!full || full.length < MIN_TRIGGER_CHARS) return;
 
     clearTimeout(this.debounceTimer);
     // Debounce: wait a short beat after the last partial before committing
@@ -97,126 +160,137 @@ class VoiceSession {
 
     if (isFinal) {
       clearTimeout(this.debounceTimer);
-      this._startTurn(text.trim());
+      this._startTurn(full);
     }
   }
 
   _abortActiveTurn() {
     if (!this.activeTurn) return;
     this.activeTurn.aborted = true;
-    try { this.activeTurn.ttsStream?.close(); } catch { /* noop */ }
+    try { this.activeTurn.abort?.abort(); } catch { /* noop */ }   // stops the Gemini stream
+    try { this.activeTurn.ttsStream?.close(); } catch { /* noop */ } // stops TTS synthesis
     this.activeTurn = null;
   }
 
   async _startTurn(userText) {
     console.log('[Pipeline] Starting turn with text:', userText);
-    if (this.activeTurn) this._abortActiveTurn();
+    // A new utterance always cancels whatever is in flight and starts a fresh
+    // pipeline. Tell the client to drop the old turn's audio.
+    if (this.activeTurn) {
+      const killedId = this.activeTurn.id;
+      this._abortActiveTurn();
+      this.send({ type: 'barge_in', turnId: killedId });
+    }
     const turnId = ++this.turnCounter;
     const timer = new TurnTimer(turnId);
     timer.mark('partial_transcript');
-    const turn = { aborted: false, ttsStream: null, ttsStarted: false };
+    const turn = { id: turnId, aborted: false, abort: new AbortController(), ttsStream: null, ttsStarted: false };
     this.activeTurn = turn;
 
-    // --- Parallel: cache lookup + RAG retrieval + (lightweight) intent ---
+    // --- Parallel: cache lookup + RAG retrieval (both fire now) ---
     const cacheLookup = this.cache ? this.cache.get(userText).catch(() => null) : Promise.resolve(null);
     const ragLookup = this.rag.retrieve(userText).catch(() => ({ context: '', hits: [], timedOut: true }));
 
-    const [cached, ragResult] = await Promise.all([cacheLookup, ragLookup]);
+    // --- Cache hit: skip LLM *and* the RAG wait, go straight to TTS ---
+    const cached = await cacheLookup;
+    if (turn.aborted) return;
+    if (cached && cached.reply) {
+      timer.mark('rag_retrieved');
+      timer.marks.cache_hit = true;
+      const ttsStream = this._openTts(turn, timer);
+      this.send({ type: 'reply_text', text: cached.reply, cached: true, turnId: turn.id });
+      ttsStream.pushText(cached.reply);
+      ttsStream.flush();
+      this._uttConsumed = true; // this question is answered; next speech is a new utterance
+      return;
+    }
+
+    // --- Cache miss: now wait for RAG (already in flight) ---
+    const ragResult = await ragLookup;
     if (turn.aborted) return;
     timer.mark('rag_retrieved');
     if (ragResult.timedOut) this.send({ type: 'info', message: 'RAG retrieval timed out, answering without context' });
 
-    // --- Cache hit: skip LLM, go straight to TTS ---
-    if (cached && cached.reply) {
-      timer.marks.cache_hit = true;
-      this._speak(turn, cached.reply, timer);
-      this.send({ type: 'reply_text', text: cached.reply, cached: true });
-      return;
-    }
-
     // --- LLM streaming with clause-boundary TTS for lower latency ---
     let sentenceBuffer = '';
+    let clauseBuffer = '';
+    let firstFlushDone = false;
     let fullReply = '';
-    let ttsStream = null;
-    
+    let ttsStream = null; // opened lazily on the first token (see below)
+    const CLAUSE_DELIMITERS = /[.!?;,\n]/;
+
     try {
-      // Build system prompt with user memory
       const systemPrompt = this._buildSystemPrompt();
-      
-      // Initialize TTS stream early for clause-by-clause synthesis
-      ttsStream = new SarvamTTSStream({
-        apiKey: this.config.sarvamApiKey,
-        model: this.config.ttsModel,
-        speaker: this.config.ttsSpeaker,
-        targetLanguageCode: this.config.ttsLanguageCode,
-        sampleRate: this.config.ttsSampleRate,
-      }).connect();
-      turn.ttsStream = ttsStream;
-      if (ttsStream) {
-        this._wireTtsToClient(turn, timer);
-      }
-      
-      let clauseBuffer = '';
-      const CLAUSE_DELIMITERS = /[.!?;,\n]/;
-      
+
       fullReply = await this.llm.streamReply({
         systemPrompt,
         shortTermTurns: this.shortTermTurns,
         ragContext: ragResult.context,
         userText,
+        signal: turn.abort.signal,
         onToken: (delta) => {
           if (turn.aborted) return;
           if (timer.marks.llm_first_token == null) timer.mark('llm_first_token');
+          // Open the TTS socket exactly when we have text for it. Opening it
+          // earlier races Sarvam's "idle socket" timeout when the LLM's
+          // first token is slow.
+          if (!ttsStream) ttsStream = this._openTts(turn, timer);
           sentenceBuffer += delta;
           clauseBuffer += delta;
-          
+
           // Send partial text to client for display
-          this.send({ type: 'reply_text', text: sentenceBuffer });
-          
-          // Flush clause to TTS when delimiter found
-          if (CLAUSE_DELIMITERS.test(delta)) {
-            const clause = clauseBuffer.trim();
-            if (clause && ttsStream) {
-              try {
-                ttsStream.pushText(clause + ' ');
-              } catch (e) {
-                console.error('[Pipeline] TTS pushText error:', e.message);
-              }
-              clauseBuffer = '';
+          this.send({ type: 'reply_text', text: sentenceBuffer, turnId: turn.id });
+
+          // Get the first words into TTS ASAP (don't wait for the first clause
+          // delimiter, which can be 40+ chars in), then flush on clause bounds.
+          const atClause = CLAUSE_DELIMITERS.test(delta);
+          const earlyFlush = !firstFlushDone && clauseBuffer.trim().length >= 8 && /\s/.test(clauseBuffer);
+          if ((atClause || earlyFlush) && clauseBuffer.trim()) {
+            try {
+              ttsStream.pushText(clauseBuffer.trim() + ' ');
+            } catch (e) {
+              console.error('[Pipeline] TTS pushText error:', e.message);
             }
+            clauseBuffer = '';
+            firstFlushDone = true;
           }
         },
       });
+      if (turn.aborted) return;
+      this._uttConsumed = true; // this question is answered; next speech is a new utterance
 
       // Flush remaining buffer
-      if (clauseBuffer.trim() && ttsStream) {
-        ttsStream.pushText(clauseBuffer);
-      }
+      if (clauseBuffer.trim() && ttsStream) ttsStream.pushText(clauseBuffer.trim());
       if (ttsStream) ttsStream.flush();
+      // LLM produced nothing (rare) -> nothing to speak, end the turn cleanly.
+      if (!ttsStream) this.send({ type: 'turn_done', turnId: turn.id });
 
-      // Extract user information from conversation
       this._extractUserInfo(userText, fullReply);
     } catch (err) {
-      this.send({ type: 'error', stage: 'llm', message: err.message });
-      // Don't close ttsStream here - it will clean up itself on error
+      if (!turn.aborted) this.send({ type: 'error', stage: 'llm', message: err.message });
       return;
     }
 
     this._pushShortTermTurn(userText, fullReply);
-    if (this.cache) this.cache.set(userText, { reply: fullReply }).catch(() => {});
+    // Only cache the final response when RAG actually delivered context -- a
+    // turn that answered without context (e.g. RAG timed out) must not poison
+    // the cache with a degraded "no information" reply.
+    if (this.cache && !ragResult.timedOut) {
+      this.cache.set(userText, { reply: fullReply }).catch(() => {});
+    }
   }
 
-  _speak(turn, text, timer) {
-    turn.ttsStream = new SarvamTTSStream({
+  _openTts(turn, timer) {
+    const s = new SarvamTTSStream({
       apiKey: this.config.sarvamApiKey,
       model: this.config.ttsModel,
       speaker: this.config.ttsSpeaker,
       targetLanguageCode: this.config.ttsLanguageCode,
       sampleRate: this.config.ttsSampleRate,
     }).connect();
+    turn.ttsStream = s;
     this._wireTtsToClient(turn, timer);
-    turn.ttsStream.pushText(text);
-    turn.ttsStream.flush();
+    return s;
   }
 
   _wireTtsToClient(turn, timer) {
@@ -232,12 +306,12 @@ class VoiceSession {
         const summary = timer.log();
         this.send({ type: 'latency', latency: summary });
       }
-      this.send({ type: 'audio_chunk', audio: base64Audio, contentType });
+      this.send({ type: 'audio_chunk', audio: base64Audio, contentType, turnId: turn.id });
     });
     stream.on('done', () => {
       if (!turn.aborted) {
         timer.mark('turn_end');
-        this.send({ type: 'turn_done' });
+        this.send({ type: 'turn_done', turnId: turn.id });
       }
       if (this.activeTurn === turn) this.activeTurn = null;
     });

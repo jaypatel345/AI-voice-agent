@@ -13,10 +13,8 @@
   "dependencies": {
     "@google/genai": "^0.15.0",
     "@qdrant/js-client-rest": "^1.11.0",
-    "@xenova/transformers": "^2.17.2",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "openai": "^7.10.0",
     "redis": "^4.7.0",
     "sarvamai": "^0.1.9",
     "uuid": "^9.0.1",
