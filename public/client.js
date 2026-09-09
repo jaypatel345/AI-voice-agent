@@ -386,4 +386,20 @@
   });
 
   clearBtn.addEventListener('click', clearConversation);
+
+  // Pre-connect the voice socket on the first interaction with the page, well
+  // before the user clicks the mic. Opening it on click meant the server only
+  // then created the session and started its Sarvam STT WebSocket handshake
+  // (~0.5-1s) -- so mic audio sat queued and the first words were dropped/late.
+  // Doing it now means the STT socket is already live when recording starts.
+  function prewarmConnection() {
+    if (ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) return;
+    shouldReconnect = true;
+    setStatus('Connecting…');
+    establishWebSocketConnection();
+  }
+  ['pointerdown', 'keydown', 'touchstart'].forEach((evt) =>
+    window.addEventListener(evt, prewarmConnection, { once: true, passive: true }));
+  // Also on mic-button hover/press specifically, for the click-straight-away case.
+  micBtn.addEventListener('pointerenter', prewarmConnection, { passive: true });
 })();
