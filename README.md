@@ -16,8 +16,8 @@ Browser (mic)  --PCM16 chunks-->  Node/Express + WebSocket server
                                                      precomputed embeddings)
                          └──────────────┬───────────────┘
                                         │
-                              OpenAI (streaming LLM)
-                              short prompt (<1000 tokens)
+                        Gemini gemini-3.1-flash-lite (Vertex AI, asia-south1)
+                              streaming LLM, short prompt (<1000 tokens)
                                         │  (flushed to TTS at clause boundaries)
                                  Sarvam TTS (streaming)
                                         │
@@ -34,7 +34,7 @@ Browser (mic)  --PCM16 chunks-->  Node/Express + WebSocket server
   from general knowledge rather than block the turn — see `RagRetriever.retrieve()`.
 * **Cache-first.** Repeated/FAQ questions skip RAG + LLM entirely (Redis, keyed by
   normalized query hash) and jump straight to TTS.
-* **Token-level streaming, twice.** OpenAI streaming tokens are pushed toward the
+* **Token-level streaming, twice.** Gemini streaming tokens are pushed toward the
   Sarvam TTS pipeline as they arrive and flushed at clause boundaries
   (`.`, `,`, `;`, newline) — audio synthesis starts before the LLM has finished
   the sentence.
@@ -55,12 +55,35 @@ Browser (mic)  --PCM16 chunks-->  Node/Express + WebSocket server
 | Component | Choice |
 |---|---|
 | STT | Sarvam AI `saaras:v4`, WebSocket streaming, raw PCM16, `high_vad_sensitivity` |
-| LLM | OpenAI API, streaming |
+| LLM | Google Vertex AI `gemini-3.1-flash-lite`, streaming (`GEMINI_LOCATION`, default `global` — see note) |
+| Embeddings | Google `text-embedding-004` (Vertex AI, `asia-south1`), 768-dim |
 | TTS | Sarvam AI `bulbul:v3`, WebSocket streaming, `linear16` output |
 | Vector DB | Qdrant, precomputed embeddings, `top_k=2` |
 | Cache | Redis, SHA1-normalized query keys |
 | Server | Node.js + Express + `ws` |
 | Frontend | Vanilla JS, Web Audio API (mic capture + gapless scheduled playback) |
+
+> **Region note — known model/region conflict.** The task brief mandates
+> `asia-south1` (Mumbai) as non-negotiable *and* the model id
+> `gemini-3.1-flash-lite`. These two cannot both be satisfied on this GCP
+> project: `gemini-3.1-flash-lite` is not served from the `asia-south1`
+> regional Vertex endpoint. Verified 2026-09-09 with a direct
+> `generateContentStream` call:
+>
+> ```
+> [asia-south1] HTTP 404 — Publisher model
+>   `projects/<project>/locations/asia-south1/publishers/google/models/gemini-3.1-flash-lite`
+>   was not found or your project does not have access to it.
+> [global]      OK
+> ```
+>
+> Resolution (no faked compliance): the model id is kept exactly as the brief
+> requires (`GEMINI_MODEL=gemini-3.1-flash-lite`) and **only the Gemini
+> generation call** falls back to the `global` endpoint via
+> `GEMINI_LOCATION` (default `global`). Every other component —
+> `text-embedding-004`, Qdrant, Redis, Sarvam, the Node server — runs in /
+> targets `asia-south1`. Set `GEMINI_LOCATION=asia-south1` if/when Google
+> enables regional Gemini for the project; the code needs no other change.
 
 ## Setup
 
@@ -69,7 +92,9 @@ Browser (mic)  --PCM16 chunks-->  Node/Express + WebSocket server
 * Node.js 18+
 * Docker (for local Qdrant + Redis), or your own hosted instances
 * A Sarvam AI API key: https://dashboard.sarvam.ai
-* An OpenAI API key
+* A Google Cloud project with billing + Vertex AI API enabled, region `asia-south1`
+  (Mumbai), authenticated via `gcloud auth application-default login` or a
+  service-account JSON (`GOOGLE_APPLICATION_CREDENTIALS`)
 
 ### 2. Install
 
@@ -86,14 +111,20 @@ Your `.env` should contain:
 ```env
 PORT=8080
 
-OPENAI_API_KEY=your_openai_api_key
 SARVAM_API_KEY=your_sarvam_api_key
+
+GOOGLE_CLOUD_PROJECT=your-gcp-project-id
+GOOGLE_CLOUD_LOCATION=asia-south1
+GEMINI_MODEL=gemini-3.1-flash-lite
+USE_VERTEX_AI=true
+EMBEDDING_MODEL=text-embedding-004
+EMBEDDING_DIM=768
 
 REDIS_URL=your_redis_url
 
 QDRANT_URL=your_qdrant_url
 QDRANT_API_KEY=your_qdrant_api_key
-QDRANT_COLLECTION=voice_assistant
+QDRANT_COLLECTION=voice_kb
 ```
 
 **Never commit `.env` or API keys to GitHub.**
@@ -114,8 +145,9 @@ docker compose up -d
 npm run ingest
 ```
 
-This chunks `server/rag/knowledge_base/sample_docs.json` into 300–500 token
-pieces, generates embeddings, and upserts them into Qdrant.
+This chunks `server/rag/knowledge_base/sample_docs.json` into 300–400 token
+pieces (50-token overlap), generates `text-embedding-004` embeddings via
+Vertex AI, and upserts them into Qdrant.
 
 Swap in your own docs by editing that JSON file (or point the script at a folder).
 
@@ -162,9 +194,10 @@ server/
                      streaming LLM -> TTS, barge-in
   sarvamStt.js       Streaming STT client (raw PCM, VAD events)
   sarvamTts.js       Streaming TTS client (text-in, audio-out)
-  llmOpenAI.js       OpenAI streaming wrapper
+  llmGemini.js       Gemini (Vertex AI) streaming wrapper
   rag/
     qdrantClient.js  Timeout-bounded top-k retrieval
+    embedder.js      Vertex AI text-embedding-004 client
     ingest.js        Chunk + embed + upsert script
     knowledge_base/  Sample docs
   cache/redisCache.js
@@ -200,8 +233,9 @@ The recommended deployment architecture is:
                            │   │   │
              ┌─────────────┘   │   └──────────────┐
              ▼                 ▼                  ▼
-        Sarvam AI          OpenAI API          Qdrant
-        STT + TTS             LLM             Vector DB
+        Sarvam AI       Vertex AI (Mumbai)     Qdrant
+        STT + TTS    Gemini 3.1-flash-lite    Vector DB
+                        + text-embedding-004
                                                  
                            │
                            ▼
@@ -213,10 +247,10 @@ The recommended deployment architecture is:
 
 | Service | Platform |
 |---|---|
-| Node.js + WebSocket | Railway |
-| Redis | Upstash |
-| Qdrant | Qdrant Cloud |
-| LLM | OpenAI API |
+| Node.js + WebSocket | Railway / GCP (asia-south1) |
+| Redis | Upstash / Memorystore (asia-south1) |
+| Qdrant | Qdrant Cloud / self-hosted (Mumbai) |
+| LLM + Embeddings | Google Vertex AI (`asia-south1`) |
 | STT + TTS | Sarvam AI |
 | Source code | GitHub |
 
@@ -225,12 +259,18 @@ The recommended deployment architecture is:
 Add these variables to your hosting platform:
 
 ```env
-OPENAI_API_KEY=...
 SARVAM_API_KEY=...
+GOOGLE_CLOUD_PROJECT=...
+GOOGLE_CLOUD_LOCATION=asia-south1
+GEMINI_MODEL=gemini-3.1-flash-lite
+USE_VERTEX_AI=true
+EMBEDDING_MODEL=text-embedding-004
+EMBEDDING_DIM=768
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
 REDIS_URL=...
 QDRANT_URL=...
 QDRANT_API_KEY=...
-QDRANT_COLLECTION=voice_assistant
+QDRANT_COLLECTION=voice_kb
 ```
 
 Do not upload `.env` to GitHub.
@@ -247,5 +287,5 @@ Do not upload `.env` to GitHub.
 * Realtime STT (`saaras:v3-realtime`/`v4-realtime`) is currently in beta and
   offers even lower latency partials than the `saaras:v4` legacy WebSocket used
   here; swap in once you have beta access.
-* OpenAI model selection can be configured through an environment variable so
-  the LLM can be changed without modifying the pipeline code.
+* Gemini model selection is configurable via `GEMINI_MODEL` so the LLM can be
+  changed without modifying the pipeline code (spec mandates `gemini-3.1-flash-lite`).

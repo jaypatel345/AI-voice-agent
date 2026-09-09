@@ -39,6 +39,23 @@ class RedisCache {
     if (!this.connected) return;
     await this.client.set(this._key(text), JSON.stringify(value), { EX: this.ttl });
   }
+
+  _embKey(text) {
+    const normalized = text.trim().toLowerCase().replace(/\s+/g, ' ');
+    return `voice_emb:${crypto.createHash('sha1').update(normalized).digest('hex')}`;
+  }
+
+  /** Cached query embedding vector, or null. */
+  async getEmbedding(text) {
+    if (!this.connected) return null;
+    const raw = await this.client.get(this._embKey(text));
+    return raw ? JSON.parse(raw) : null;
+  }
+
+  async setEmbedding(text, vector) {
+    if (!this.connected) return;
+    await this.client.set(this._embKey(text), JSON.stringify(vector), { EX: this.ttl });
+  }
 }
 
 export { RedisCache };

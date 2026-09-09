@@ -3,33 +3,40 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { QdrantClient } from '@qdrant/js-client-rest';
-import { pipeline, env } from '@xenova/transformers';
-
-// Disable local model downloads, use cache
-env.allowLocalModels = false;
-env.useBrowserCache = false;
+import { VertexEmbedder } from './embedder.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const CHUNK_MIN_TOKENS = 300;
-const CHUNK_MAX_TOKENS = 500;
+const CHUNK_MAX_TOKENS = 400; // spec: 300-400 token chunks
+const CHUNK_OVERLAP_TOKENS = 50; // spec: 50 token overlap
 const CHARS_PER_TOKEN = 4; // rough heuristic, good enough for chunk sizing
 
-/** Splits long text into ~300-500 token chunks on sentence boundaries. */
+/**
+ * Splits long text into ~300-400 token chunks on sentence boundaries with a
+ * ~50 token overlap between consecutive chunks (per the RAG spec).
+ */
 function chunkText(text) {
   const sentences = text.match(/[^.!?]+[.!?]+/g) || [text];
+  const maxChars = CHUNK_MAX_TOKENS * CHARS_PER_TOKEN;
+  const overlapChars = CHUNK_OVERLAP_TOKENS * CHARS_PER_TOKEN;
+
   const chunks = [];
   let current = '';
   for (const sentence of sentences) {
-    const candidate = current ? `${current} ${sentence.trim()}` : sentence.trim();
-    if (candidate.length / CHARS_PER_TOKEN > CHUNK_MAX_TOKENS && current) {
+    const s = sentence.trim();
+    const candidate = current ? `${current} ${s}` : s;
+    if (candidate.length > maxChars && current) {
       chunks.push(current.trim());
-      current = sentence.trim();
+      // start the next chunk with the tail of the previous one (overlap)
+      const tail = current.slice(-overlapChars);
+      current = `${tail} ${s}`.trim();
     } else {
       current = candidate;
     }
   }
   if (current) chunks.push(current.trim());
+
   // Merge any tiny trailing chunk below the min into the previous one
   if (chunks.length > 1 && chunks[chunks.length - 1].length / CHARS_PER_TOKEN < CHUNK_MIN_TOKENS) {
     const last = chunks.pop();
@@ -44,25 +51,33 @@ async function main() {
     apiKey: process.env.QDRANT_API_KEY || undefined,
   });
 
-  // Load local embedding model
-  const embeddingModelName = process.env.EMBEDDING_MODEL || 'Xenova/bge-small-en-v1.5';
-  console.log(`Loading local embedding model: ${embeddingModelName}...`);
-  const embedder = await pipeline('feature-extraction', embeddingModelName);
-  console.log('Embedding model loaded.');
+  const embedder = new VertexEmbedder({
+    model: process.env.EMBEDDING_MODEL || 'text-embedding-004',
+    project: process.env.GOOGLE_CLOUD_PROJECT,
+    location: process.env.GOOGLE_CLOUD_LOCATION || 'asia-south1',
+  });
 
   const collection = process.env.QDRANT_COLLECTION || 'voice_kb';
-  // BAAI/bge-small-en-v1.5 produces 384-dimensional embeddings
-  const dim = Number(process.env.EMBEDDING_DIM || 384);
+  // text-embedding-004 produces 768-dimensional embeddings
+  const dim = Number(process.env.EMBEDDING_DIM || 768);
 
   console.log(`Ensuring collection "${collection}" (dim=${dim})...`);
   const collections = await qdrant.getCollections();
-  if (!collections.collections.some((c) => c.name === collection)) {
-    await qdrant.createCollection(collection, {
-      vectors: { size: dim, distance: 'Cosine' },
-    });
-    console.log('Created collection.');
+  const existing = collections.collections.find((c) => c.name === collection);
+  if (existing) {
+    const info = await qdrant.getCollection(collection);
+    const currentDim = info.config?.params?.vectors?.size;
+    if (currentDim && currentDim !== dim) {
+      console.log(`Collection dim ${currentDim} != ${dim}; recreating.`);
+      await qdrant.deleteCollection(collection);
+      await qdrant.createCollection(collection, { vectors: { size: dim, distance: 'Cosine' } });
+      console.log('Recreated collection.');
+    } else {
+      console.log('Collection already exists.');
+    }
   } else {
-    console.log('Collection already exists.');
+    await qdrant.createCollection(collection, { vectors: { size: dim, distance: 'Cosine' } });
+    console.log('Created collection.');
   }
 
   const docsPath = path.join(__dirname, 'knowledge_base', 'sample_docs.json');
@@ -73,9 +88,7 @@ async function main() {
   for (const doc of docs) {
     const chunks = chunkText(doc.text);
     for (const chunk of chunks) {
-      // Generate embedding using local model
-      const embedding = await embedder(chunk, { pooling: 'mean', normalize: true });
-      const vector = Array.from(embedding.data); // Convert to regular array
+      const vector = await embedder.embed(chunk, 'RETRIEVAL_DOCUMENT');
       points.push({
         id: pointId++,
         vector,

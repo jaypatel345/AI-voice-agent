@@ -34,20 +34,18 @@ function buildConfig() {
     ttsSpeaker: process.env.TTS_SPEAKER,
     ttsSampleRate: Number(process.env.TTS_SAMPLE_RATE || 24000),
     ttsLanguageCode: process.env.TTS_LANGUAGE_CODE || process.env.STT_LANGUAGE_CODE,
-    llmProvider: process.env.LLM_PROVIDER || 'gemini',
-    openaiApiKey: process.env.OPENAI_API_KEY,
-    openaiModel: process.env.OPENAI_MODEL,
     gcpProject: process.env.GOOGLE_CLOUD_PROJECT,
-    gcpLocation: process.env.GOOGLE_CLOUD_LOCATION,
-    geminiModel: process.env.GEMINI_MODEL,
-    googleApiKey: process.env.GOOGLE_API_KEY,
-    useVertexAI: process.env.USE_VERTEX_AI,
+    gcpLocation: process.env.GOOGLE_CLOUD_LOCATION || 'asia-south1',
+    // Vertex serves Gemini generation for this project only via `global`;
+    // regional endpoints (asia-south1) 404. Embeddings/RAG stay in asia-south1.
+    geminiLocation: process.env.GEMINI_LOCATION || 'global',
+    geminiModel: process.env.GEMINI_MODEL || 'gemini-3.1-flash-lite',
     qdrantUrl: process.env.QDRANT_URL,
     qdrantApiKey: process.env.QDRANT_API_KEY,
     qdrantCollection: process.env.QDRANT_COLLECTION,
     embeddingModel: process.env.EMBEDDING_MODEL,
     ragTopK: Number(process.env.RAG_TOP_K || 2),
-    ragContextTokenLimit: Number(process.env.RAG_CONTEXT_TOKEN_LIMIT || 2000),
+    ragContextTokenLimit: Number(process.env.RAG_CONTEXT_TOKEN_LIMIT || 1000),
     ragTimeoutMs: Number(process.env.RAG_RETRIEVAL_TIMEOUT_MS || 150),
     shortTermTurns: Number(process.env.SHORT_TERM_TURNS || 3),
     cache,
@@ -74,7 +72,8 @@ wss.on('connection', (ws) => {
     } else if (msg.type === 'flush') {
       session.stt.flush();
     } else if (msg.type === 'text_input' && msg.text) {
-      // Direct text input for testing (bypasses STT)
+      // Test-only entry point: bypasses STT so benchmark/latency_test.js can
+      // drive the RAG→LLM→TTS pipeline deterministically. Not exposed in the UI.
       session._startTurn(msg.text);
     }
   });

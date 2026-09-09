@@ -7,35 +7,55 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <main>
-    <h1>🎙️ Low-Latency Voice Assistant</h1>
-    <p class="subtitle">Sarvam STT/TTS · Qdrant RAG · OpenAI LLM · Redis cache</p>
+  <main class="layout">
+    <section class="left">
+      <header class="brand">
+        <h1>🎙️ Low-Latency Voice Assistant</h1>
+        <p class="subtitle">Sarvam STT/TTS · Qdrant RAG · Gemini (Vertex AI) · Redis cache</p>
+      </header>
 
-    <div class="controls">
-      <button id="micBtn" class="mic-btn">Start talking</button>
-      <input type="text" id="textInput" placeholder="Or type here to test..." class="text-input" />
-      <button id="sendTextBtn" class="send-btn">Send</button>
-      <button id="clearBtn" class="clear-btn">Clear</button>
-    </div>
-    <div id="status" class="status">Idle</div>
-
-    <section class="panel">
-      <h2>Your Message</h2>
-      <div id="transcript" class="scrollbox"></div>
-    </section>
-
-    <section class="panel">
-      <h2>Assistant Response</h2>
-      <div id="reply" class="scrollbox"></div>
-    </section>
-
-    <section class="panel">
-      <h2>Latency</h2>
-      <div id="latency" class="latency">
-        <div>First audio: <span id="latFirstAudio">–</span> ms</div>
-        <div>RAG: <span id="latRag">–</span> ms</div>
-        <div>LLM first token: <span id="latLlm">–</span> ms</div>
+      <div class="mic-stage">
+        <button id="micBtn" class="mic-btn" aria-label="Start talking">
+          <svg class="mic-icon" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+            <rect x="9" y="2" width="6" height="12" rx="3" fill="currentColor" />
+            <path d="M5 11a7 7 0 0 0 14 0" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+            <line x1="12" y1="18" x2="12" y2="22" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+          </svg>
+        </button>
+        <div id="status" class="status">Idle</div>
       </div>
+    </section>
+
+    <section class="right">
+      <div class="card">
+        <h2>Your Message</h2>
+        <div id="transcript" class="scrollbox"></div>
+      </div>
+
+      <div class="card">
+        <h2>Assistant Response</h2>
+        <div id="reply" class="scrollbox"></div>
+      </div>
+
+      <div class="card latency-card">
+        <h2>Latency</h2>
+        <div class="metrics">
+          <div class="metric">
+            <span class="metric-label">First audio</span>
+            <span class="metric-value" id="latFirstAudio">–</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">RAG</span>
+            <span class="metric-value" id="latRag">–</span>
+          </div>
+          <div class="metric">
+            <span class="metric-label">LLM</span>
+            <span class="metric-value" id="latLlm">–</span>
+          </div>
+        </div>
+      </div>
+
+      <button id="clearBtn" class="clear-btn">Clear</button>
     </section>
   </main>
   <script src="client.js"></script>
