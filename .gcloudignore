@@ -1,0 +1,12 @@
+# What NOT to upload to Cloud Build when running `gcloud run deploy --source .`
+.git
+.gitignore
+.claude
+node_modules
+.env
+.env.*
+!.env.example
+service-account.json
+benchmark
+aiTask1.pdf
+*.md

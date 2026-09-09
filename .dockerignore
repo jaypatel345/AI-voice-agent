@@ -1,0 +1,15 @@
+node_modules
+npm-debug.log
+.env
+.env.*
+!.env.example
+service-account.json
+*.json.key
+.git
+.gitignore
+.claude
+benchmark
+aiTask1.pdf
+README.md
+docker-compose.yml
+*.md
