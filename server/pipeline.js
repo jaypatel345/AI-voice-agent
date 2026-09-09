@@ -235,8 +235,14 @@ class VoiceSession {
     let clauseBuffer = '';
     let firstFlushDone = false;
     let fullReply = '';
-    let ttsStream = null; // opened lazily on the first token (see below)
     const CLAUSE_DELIMITERS = /[.!?;,\n]/;
+
+    // Open the TTS socket now, before the LLM call, so its WebSocket connect +
+    // config handshake (~200-300ms) overlaps the LLM's first-token latency
+    // instead of adding to the critical path after it. The first clause is
+    // pushed within ~1s (well inside Sarvam's idle-socket window), so opening
+    // early carries no timeout risk. `onToken` keeps a lazy-open fallback.
+    let ttsStream = this._openTts(turn, timer);
 
     try {
       const systemPrompt = this._buildSystemPrompt();
@@ -250,9 +256,6 @@ class VoiceSession {
         onToken: (delta) => {
           if (turn.aborted) return;
           if (timer.marks.llm_first_token == null) timer.mark('llm_first_token');
-          // Open the TTS socket exactly when we have text for it. Opening it
-          // earlier races Sarvam's "idle socket" timeout when the LLM's
-          // first token is slow.
           if (!ttsStream) ttsStream = this._openTts(turn, timer);
           sentenceBuffer += delta;
           clauseBuffer += delta;
@@ -286,6 +289,7 @@ class VoiceSession {
 
       this._extractUserInfo(userText, fullReply);
     } catch (err) {
+      try { turn.ttsStream?.close(); } catch { /* noop */ } // don't leak the pre-opened socket
       if (!turn.aborted) this.send({ type: 'error', stage: 'llm', message: err.message });
       return;
     }
