@@ -14,6 +14,20 @@ const PARTIAL_DEBOUNCE_MS = 30; // Faster response - fire immediately after spee
 const MIN_TRIGGER_CHARS = 3;
 const UTTERANCE_GAP_MS = 8000; // silence long enough that new speech is a new question
 
+// The Vertex (LLM + embeddings) and Qdrant clients are process-wide singletons
+// (see llmGemini.js / embedder.js / qdrantClient.js). Warm them once when the
+// first connection opens, then on a slow interval so an idle instance's TLS /
+// ADC-token state doesn't go cold before the next caller -- instead of every
+// WebSocket connection firing its own warmup burst.
+let _warmStarted = false;
+function warmOnce(llm, rag) {
+  if (_warmStarted) return;
+  _warmStarted = true;
+  const beat = () => { llm.warmup().catch(() => {}); rag.warmup().catch(() => {}); };
+  beat();
+  setInterval(beat, 90_000).unref();
+}
+
 /** Merge a fresh STT segment `b` onto the accumulated utterance `a` without duplicating. */
 function mergeSegment(a, b) {
   a = (a || '').trim();
@@ -80,10 +94,9 @@ class VoiceSession {
       location: config.geminiLocation || config.gcpLocation,
     });
 
-    // Pre-warm the Vertex connections/auth so the first turn isn't cold
-    // (cold first-token ~1.5s vs ~0.7s warm). Fire-and-forget.
-    this.llm.warmup();
-    this.rag.warmup();
+    // Pre-warm the shared Vertex/Qdrant clients once for the process (not once
+    // per connection) so the first turn isn't cold and idle instances stay warm.
+    warmOnce(this.llm, this.rag);
 
     this.stt = new SarvamSTTStream({
       apiKey: config.sarvamApiKey,

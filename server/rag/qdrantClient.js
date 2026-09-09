@@ -1,6 +1,20 @@
 import { QdrantClient } from '@qdrant/js-client-rest';
 import { VertexEmbedder } from './embedder.js';
 
+// One QdrantClient per URL, shared across every RagRetriever / VoiceSession so
+// the HTTPS keep-alive connection to the (cross-region) cluster is reused
+// instead of re-handshaked per WebSocket connection. `checkCompatibility:false`
+// drops the extra `GET /` version probe the client otherwise fires on startup.
+const _qdrantClients = new Map();
+function sharedQdrant(url, apiKey) {
+  let client = _qdrantClients.get(url);
+  if (!client) {
+    client = new QdrantClient({ url, apiKey: apiKey || undefined, checkCompatibility: false });
+    _qdrantClients.set(url, client);
+  }
+  return client;
+}
+
 /**
  * RAG retrieval, bounded to RAG_RETRIEVAL_TIMEOUT_MS (default 150ms) per
  * the spec. Document embeddings are precomputed at ingest time
@@ -14,7 +28,7 @@ import { VertexEmbedder } from './embedder.js';
  */
 class RagRetriever {
   constructor({ qdrantUrl, qdrantApiKey, collection, embeddingModel, project, location, topK, contextTokenLimit, timeoutMs, cache }) {
-    this.client = new QdrantClient({ url: qdrantUrl, apiKey: qdrantApiKey || undefined });
+    this.client = sharedQdrant(qdrantUrl, qdrantApiKey);
     this.collection = collection || 'voice_kb';
     this.topK = topK || 2;
     this.contextTokenLimit = contextTokenLimit || 1000;
@@ -32,6 +46,10 @@ class RagRetriever {
   }
 
   async _embedQuery(text) {
+    // In-process memo first: a repeat query then skips the Upstash round-trip
+    // and the embed call entirely.
+    const memoed = this.embedder.peekMemo(text);
+    if (memoed) return memoed;
     if (this.cache) {
       const cached = await this.cache.getEmbedding(text).catch(() => null);
       if (cached) return cached;

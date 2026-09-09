@@ -1,5 +1,20 @@
 import { GoogleGenAI } from '@google/genai';
 
+// One GoogleGenAI client per (project, location), shared across every
+// GeminiStreamingLLM / VoiceSession so the TLS session + ADC token stay warm
+// across WebSocket connections instead of paying a fresh cold handshake
+// (~400-500ms of the first-token latency) on each new connection.
+const _genaiClients = new Map();
+function sharedGenAI(project, location) {
+  const key = `${project}|${location}`;
+  let client = _genaiClients.get(key);
+  if (!client) {
+    client = new GoogleGenAI({ vertexai: true, project, location });
+    _genaiClients.set(key, client);
+  }
+  return client;
+}
+
 /**
  * Streaming Gemini calls on Vertex AI (asia-south1 / Mumbai).
  * Auth is Application Default Credentials only -- no API keys.
@@ -12,11 +27,7 @@ class GeminiStreamingLLM {
     // global endpoint; the asia-south1 regional endpoint 404s. Embeddings/RAG
     // continue to run in asia-south1 (see server/rag/embedder.js).
     this.location = location || process.env.GEMINI_LOCATION || 'global';
-    this.client = new GoogleGenAI({
-      vertexai: true,
-      project: project || process.env.GOOGLE_CLOUD_PROJECT,
-      location: this.location,
-    });
+    this.client = sharedGenAI(project || process.env.GOOGLE_CLOUD_PROJECT, this.location);
   }
 
   /**
