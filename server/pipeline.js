@@ -15,17 +15,23 @@ const MIN_TRIGGER_CHARS = 3;
 const UTTERANCE_GAP_MS = 8000; // silence long enough that new speech is a new question
 
 // The Vertex (LLM + embeddings) and Qdrant clients are process-wide singletons
-// (see llmGemini.js / embedder.js / qdrantClient.js). Warm them once when the
-// first connection opens, then on a slow interval so an idle instance's TLS /
-// ADC-token state doesn't go cold before the next caller -- instead of every
-// WebSocket connection firing its own warmup burst.
-let _warmStarted = false;
-function warmOnce(llm, rag) {
-  if (_warmStarted) return;
-  _warmStarted = true;
-  const beat = () => { llm.warmup().catch(() => {}); rag.warmup().catch(() => {}); };
-  beat();
-  setInterval(beat, 90_000).unref();
+// (see llmGemini.js / embedder.js / qdrantClient.js) so their TLS session + ADC
+// token are shared across every WebSocket connection instead of re-handshaked
+// per session.
+//   - warmClients(): a light, non-blocking warm on each new connection so the
+//     sockets are hot by the time the user finishes their first sentence (a
+//     keep-alive socket goes cold after a few seconds idle even though the
+//     token stays cached). One ping each, not the old per-session burst.
+//   - a single process-wide slow interval so a long-idle instance doesn't go
+//     fully cold between callers.
+let _keepaliveStarted = false;
+function warmClients(llm, rag) {
+  llm.warmup().catch(() => {});
+  rag.warmup().catch(() => {});
+  if (!_keepaliveStarted) {
+    _keepaliveStarted = true;
+    setInterval(() => { llm.warmup().catch(() => {}); rag.warmup().catch(() => {}); }, 90_000).unref();
+  }
 }
 
 /** Merge a fresh STT segment `b` onto the accumulated utterance `a` without duplicating. */
@@ -94,9 +100,9 @@ class VoiceSession {
       location: config.geminiLocation || config.gcpLocation,
     });
 
-    // Pre-warm the shared Vertex/Qdrant clients once for the process (not once
-    // per connection) so the first turn isn't cold and idle instances stay warm.
-    warmOnce(this.llm, this.rag);
+    // Warm the shared Vertex/Qdrant sockets so this connection's first turn
+    // isn't cold; also arms the process-wide idle keepalive (once).
+    warmClients(this.llm, this.rag);
 
     this.stt = new SarvamSTTStream({
       apiKey: config.sarvamApiKey,
