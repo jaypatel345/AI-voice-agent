@@ -58,47 +58,73 @@ class GeminiStreamingLLM {
   }
 
   async streamReply({ systemPrompt, shortTermTurns = [], ragContext, userText, onToken, signal }) {
-    try {
-      const contents = [
-        ...shortTermTurns.map((t) => ({ role: t.role, parts: [{ text: t.text }] })),
-        {
-          role: 'user',
-          parts: [{
-            text: ragContext
-              ? `Context:\n${ragContext}\n\nUser: ${userText}`
-              : userText,
-          }],
-        },
-      ];
+    const contents = [
+      ...shortTermTurns.map((t) => ({ role: t.role, parts: [{ text: t.text }] })),
+      {
+        role: 'user',
+        parts: [{
+          text: ragContext
+            ? `Context:\n${ragContext}\n\nUser: ${userText}`
+            : userText,
+        }],
+      },
+    ];
+    const config = {
+      systemInstruction: systemPrompt,
+      maxOutputTokens: 80, // spec: minimal output -> shorter TTS queue -> lower perceived latency
+      temperature: 0.2,
+    };
 
-      console.log('[LLM] Calling model:', this.model, 'with useVertexAI:', this.useVertexAI);
-      const stream = await this.client.models.generateContentStream({
-        model: this.model,
-        contents,
-        config: {
-          systemInstruction: systemPrompt,
-          maxOutputTokens: 80, // spec: minimal output -> shorter TTS queue -> lower perceived latency
-          temperature: 0.2,
-          abortSignal: signal, // barge-in: stop consuming tokens the instant the turn is cancelled
-        },
-      });
+    // Vertex `global` occasionally accepts the request then stalls before the
+    // first token for many seconds. Guard only the pre-first-token window: if
+    // nothing arrives in time, abort that attempt and retry once (same prompt,
+    // same output). Once tokens are flowing we never restart -- that would
+    // corrupt the streamed reply -- and a barge-in abort never retries.
+    const FIRST_TOKEN_TIMEOUT_MS = 2200;
+    const MAX_ATTEMPTS = 2;
 
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      if (signal?.aborted) return '';
+      const attemptCtrl = new AbortController();
+      const relayAbort = () => attemptCtrl.abort();
+      signal?.addEventListener('abort', relayAbort, { once: true });
+      let firstToken = false;
+      const watchdog = setTimeout(() => { if (!firstToken) attemptCtrl.abort(); }, FIRST_TOKEN_TIMEOUT_MS);
       let full = '';
-      for await (const chunk of stream) {
-        if (signal?.aborted) break;
-        const delta = chunk.text || '';
-        if (delta) {
-          full += delta;
-          onToken(delta);
+      try {
+        console.log('[LLM] Calling model:', this.model, 'attempt', attempt);
+        const stream = await this.client.models.generateContentStream({
+          model: this.model,
+          contents,
+          config: { ...config, abortSignal: attemptCtrl.signal },
+        });
+        for await (const chunk of stream) {
+          if (signal?.aborted) { clearTimeout(watchdog); return ''; }
+          const delta = chunk.text || '';
+          if (delta) {
+            if (!firstToken) { firstToken = true; clearTimeout(watchdog); }
+            full += delta;
+            onToken(delta);
+          }
         }
+        clearTimeout(watchdog);
+        signal?.removeEventListener('abort', relayAbort);
+        console.log('[LLM] Response complete, length:', full.length);
+        return full;
+      } catch (error) {
+        clearTimeout(watchdog);
+        signal?.removeEventListener('abort', relayAbort);
+        if (signal?.aborted) return ''; // cancelled by barge-in
+        if (!firstToken && attempt < MAX_ATTEMPTS) {
+          console.warn(`[LLM] no first token in ${FIRST_TOKEN_TIMEOUT_MS}ms, retrying`);
+          continue;
+        }
+        if (error?.name === 'AbortError') return '';
+        console.error('[LLM] Error:', error.message);
+        throw error;
       }
-      console.log('[LLM] Response complete, length:', full.length);
-      return full;
-    } catch (error) {
-      if (signal?.aborted || error?.name === 'AbortError') return ''; // cancelled by barge-in
-      console.error('[LLM] Error:', error.message);
-      throw error;
     }
+    return '';
   }
 }
 

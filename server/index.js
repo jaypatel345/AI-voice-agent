@@ -1,10 +1,21 @@
 import 'dotenv/config';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { setGlobalDispatcher, Agent } from 'undici';
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import { VoiceSession } from './pipeline.js';
 import { RedisCache } from './cache/redisCache.js';
+
+// Node's global fetch (used by @google/genai and @qdrant/js-client-rest) drops
+// an idle keep-alive socket after ~4s by default, so back-to-back turns kept
+// re-paying the TLS + HTTP/2 handshake to Vertex and Qdrant -- ~100-200ms per
+// leg on the RAG + LLM critical path. Hold idle sockets open for 60s instead.
+setGlobalDispatcher(new Agent({
+  keepAliveTimeout: 60_000,
+  keepAliveMaxTimeout: 600_000,
+  connections: 128,
+}));
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
