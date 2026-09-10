@@ -32,6 +32,9 @@ class SarvamSTTStream extends EventEmitter {
     this.ready = false;
     this._pending = [];
     this._explicitlyClosed = false;
+    this._retryMs = 1000;       // exponential backoff, reset on a clean open
+    this._retryTimer = null;
+    this._giveUp = false;       // set on a permanent error (credits / auth)
   }
 
   connect() {
@@ -52,6 +55,7 @@ class SarvamSTTStream extends EventEmitter {
 
     this.ws.on('open', () => {
       this.ready = true;
+      this._retryMs = 1000; // clean connection -> reset backoff
       // flush anything queued while the socket was connecting
       this._pending.forEach((chunk) => this.ws.send(chunk));
       this._pending = [];
@@ -84,13 +88,26 @@ class SarvamSTTStream extends EventEmitter {
       this.emit('error', err);
     });
     this.ws.on('close', (code, reason) => {
-      console.log('[STT] WebSocket closed:', code, reason);
+      const text = reason?.toString() || '';
       this.ready = false;
-      this.emit('close', code, reason?.toString());
-      // Auto-reconnect for session continuity (STT should stay open)
-      if (!this._explicitlyClosed) {
-        setTimeout(() => this.connect(), 1000);
+      this.emit('close', code, text);
+
+      // A 1003 (policy) close for exhausted credits or a bad key is permanent --
+      // reconnecting just tight-loops against the API. Stop and surface it once.
+      const permanent = code === 1003 && /credit|exhaust|not authori[sz]ed|invalid.*key/i.test(text);
+      if (permanent && !this._giveUp) {
+        this._giveUp = true;
+        console.error('[STT] permanent failure, not reconnecting:', text.slice(0, 120));
+        this.emit('error', new Error(text || 'STT permanently unavailable'));
+        return;
       }
+      if (this._explicitlyClosed || this._giveUp) return;
+
+      // Otherwise reconnect with capped exponential backoff (1s -> 30s).
+      console.log('[STT] closed', code, `- retrying in ${this._retryMs}ms`);
+      clearTimeout(this._retryTimer);
+      this._retryTimer = setTimeout(() => this.connect(), this._retryMs);
+      this._retryMs = Math.min(this._retryMs * 2, 30_000);
     });
 
     return this;
@@ -117,6 +134,7 @@ class SarvamSTTStream extends EventEmitter {
 
   close() {
     this._explicitlyClosed = true;
+    clearTimeout(this._retryTimer);
     try { this.ws?.close(1000, 'client done'); } catch { /* noop */ }
   }
 }

@@ -46,43 +46,66 @@ const ms = (x) => (x == null ? null : Math.round(x));
 function runConversation(questions, collect) {
   return new Promise((resolve) => {
     const ws = new WebSocket(URL);
-    let idx = -1, firstAudioAt = 0, sentAt = 0, srv = null, advanced = false;
+    let idx = -1, firstAudioAt = 0, firstReplyAt = 0, sentAt = 0, advanced = false, turnErr = null;
+    let perTurnTimer = null;
     const rows = [];
 
+    const record = () => {
+      if (!collect || idx < 0 || idx >= questions.length) return;
+      // one row per turn, even if it errored
+      if (rows[idx]) return;
+      rows[idx] = { q: questions[idx], cache: false, rag: null, llm: null, tts: null, total: null, note: turnErr || 'no audio (client-timed)' };
+    };
     const next = () => {
+      clearTimeout(perTurnTimer);
       idx++;
       if (idx >= questions.length) { ws.close(); return; }
-      sentAt = Date.now(); firstAudioAt = 0; srv = null; advanced = false;
+      sentAt = Date.now(); firstAudioAt = 0; firstReplyAt = 0; advanced = false; turnErr = null;
       ws.send(JSON.stringify({ type: 'text_input', text: questions[idx] }));
+      // safety: if neither audio nor turn_done nor error lands, move on anyway
+      perTurnTimer = setTimeout(() => { record(); advance(); }, 14000);
     };
-    // advance once we have the first audio for this turn (turn_done is not always sent)
-    const advance = () => { if (advanced) return; advanced = true; setTimeout(next, 1400); };
+    const advance = () => { if (advanced) return; advanced = true; clearTimeout(perTurnTimer); setTimeout(next, 1400); };
 
     ws.on('open', () => setTimeout(next, 1200));
     ws.on('message', (raw) => {
       const m = JSON.parse(raw.toString());
+      if (m.type === 'reply_text' && !firstReplyAt) firstReplyAt = Date.now() - sentAt;
       if (m.type === 'audio_chunk' && !firstAudioAt) firstAudioAt = Date.now() - sentAt;
+      if (m.type === 'error') { turnErr = `${m.stage || 'error'}: ${(m.message || '').slice(0, 60)}`; }
       if (m.type === 'latency') {
-        srv = m.latency;
-        if (collect) {
+        const srv = m.latency;
+        if (collect && !rows[idx]) {
           const rag = srv.rag_latency_ms;
           const llm = srv.llm_first_token_ms != null && srv.rag_retrieved_ms != null
             ? srv.llm_first_token_ms - srv.rag_retrieved_ms : null;
           const total = srv.first_audio_to_client_ms ?? firstAudioAt;
           const tts = total != null && srv.llm_first_token_ms != null
             ? total - srv.llm_first_token_ms : null;
-          rows.push({ q: questions[idx], cache: !!srv.cache_hit, rag: ms(rag), llm: ms(llm), tts: ms(tts), total: ms(total) });
+          rows[idx] = { q: questions[idx], cache: !!srv.cache_hit, rag: ms(rag), llm: ms(llm), tts: ms(tts), total: ms(total), note: '' };
+        }
+        advance();
+      }
+      // TTS dead (no audio, no latency msg) -> fall back to client wall-clock at turn_done/error
+      if (m.type === 'turn_done' || m.type === 'error') {
+        if (collect && !rows[idx]) {
+          rows[idx] = {
+            q: questions[idx], cache: false,
+            rag: null, llm: null, tts: null,
+            total: firstAudioAt || null,
+            note: turnErr || (firstReplyAt ? `~${firstReplyAt}ms to first reply text (RAG+LLM, no audio)` : 'no audio'),
+          };
         }
         advance();
       }
     });
-    ws.on('close', () => resolve(rows));
+    ws.on('close', () => resolve(rows.filter(Boolean)));
     ws.on('error', (e) => {
       const why = e.code === 'ECONNREFUSED'
         ? `cannot reach ${URL} — is the server running?  (start it with: npm start)`
         : (e.code || e.message || e);
       console.error('WS error:', why);
-      resolve(rows);
+      resolve(rows.filter(Boolean));
     });
     setTimeout(() => ws.close(), 20000 + questions.length * 12000);
   });
@@ -105,22 +128,33 @@ function stats(arr) {
 
   const rows = await runConversation(QS, true);
 
+  if (!rows.length) {
+    console.log('No turns completed. Check the server logs above for the cause.');
+    return;
+  }
+
   const pad = (s, n) => String(s).padStart(n);
   console.log('  #   RAG    LLM    TTS   TOTAL  cache  question');
   console.log('  ─────────────────────────────────────────────────────────────');
   rows.forEach((r, i) => {
     console.log(
-      `  ${pad(i + 1, 2)}  ${pad(r.rag ?? '–', 4)}  ${pad(r.llm ?? '–', 4)}  ${pad(r.tts ?? '–', 4)}  ${pad(r.total ?? '–', 5)}   ${r.cache ? '✓ ' : '  '}   ${r.q.slice(0, 40)}`,
+      `  ${pad(i + 1, 2)}  ${pad(r.rag ?? '–', 4)}  ${pad(r.llm ?? '–', 4)}  ${pad(r.tts ?? '–', 4)}  ${pad(r.total ?? '–', 5)}   ${r.cache ? '✓ ' : '  '}   ${r.q.slice(0, 38)}`,
     );
+    if (r.note) console.log(`        ↳ ${r.note}`);
   });
 
   const cols = ['rag', 'llm', 'tts', 'total'];
-  console.log('\n  stage    median    avg     p95   (ms)');
+  const measured = rows.filter((r) => r.total != null);
+  console.log(`\n  stage    median    avg     p95   (ms)   [${measured.length}/${rows.length} turns with full server timing]`);
   console.log('  ────────────────────────────────────');
   for (const c of cols) {
     const s = stats(rows.map((r) => r[c]));
     console.log(`  ${c.toUpperCase().padEnd(6)}  ${pad(s.median ?? '–', 6)}  ${pad(s.avg ?? '–', 6)}  ${pad(s.p95 ?? '–', 6)}`);
   }
-  const under1s = rows.filter((r) => r.total != null && r.total < 1000).length;
-  console.log(`\n  turns under 1000 ms: ${under1s}/${rows.length}`);
+  const under1s = measured.filter((r) => r.total < 1000).length;
+  console.log(`\n  turns under 1000 ms: ${under1s}/${measured.length}`);
+  if (measured.length < rows.length) {
+    console.log('\n  Note: stage timings only arrive with the first audio chunk, so turns');
+    console.log('  where TTS failed show no RAG/LLM/TTS split (see the ↳ note per turn).');
+  }
 })();
