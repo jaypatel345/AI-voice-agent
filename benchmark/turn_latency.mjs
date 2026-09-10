@@ -77,7 +77,13 @@ function runConversation(questions, collect) {
       }
     });
     ws.on('close', () => resolve(rows));
-    ws.on('error', (e) => { console.error('WS error:', e.message); resolve(rows); });
+    ws.on('error', (e) => {
+      const why = e.code === 'ECONNREFUSED'
+        ? `cannot reach ${URL} — is the server running?  (start it with: npm start)`
+        : (e.code || e.message || e);
+      console.error('WS error:', why);
+      resolve(rows);
+    });
     setTimeout(() => ws.close(), 20000 + questions.length * 12000);
   });
 }
